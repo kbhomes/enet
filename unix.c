@@ -15,6 +15,7 @@
 #include <string.h>
 #include <errno.h>
 #include <time.h>
+#include <stdio.h>
 
 #define ENET_BUILDING_LIB 1
 #include "enet/enet.h"
@@ -51,7 +52,7 @@
 #endif
 
 #ifdef HAS_POLL
-#include <sys/poll.h>
+#include <poll.h>
 #endif
 
 #ifndef HAS_SOCKLEN_T
@@ -117,6 +118,10 @@ enet_address_set_host_ip (ENetAddress * address, const char * name)
 int
 enet_address_set_host (ENetAddress * address, const char * name)
 {
+#ifdef __SWITCH__
+  return enet_address_set_host_ip (address, name);
+#endif
+
 #ifdef HAS_GETADDRINFO
     struct addrinfo hints, * resultList = NULL, * result = NULL;
 
@@ -434,11 +439,10 @@ enet_socket_send (ENetSocket socket,
                   const ENetBuffer * buffers,
                   size_t bufferCount)
 {
-    struct msghdr msgHdr;
     struct sockaddr_in sin;
+    size_t buff, dataPos, dataLength;
+    char *data;
     int sentLength;
-
-    memset (& msgHdr, 0, sizeof (struct msghdr));
 
     if (address != NULL)
     {
@@ -447,16 +451,24 @@ enet_socket_send (ENetSocket socket,
         sin.sin_family = AF_INET;
         sin.sin_port = ENET_HOST_TO_NET_16 (address -> port);
         sin.sin_addr.s_addr = address -> host;
-
-        msgHdr.msg_name = & sin;
-        msgHdr.msg_namelen = sizeof (struct sockaddr_in);
     }
 
-    msgHdr.msg_iov = (struct iovec *) buffers;
-    msgHdr.msg_iovlen = bufferCount;
+    // Concatenate all message buffers into one data buffer
+    dataLength = 0;
+    for (buff = 0; buff < bufferCount; buff++) {
+      dataLength += buffers[buff].dataLength;
+    }
 
-    sentLength = sendmsg (socket, & msgHdr, MSG_NOSIGNAL);
-    
+    data = malloc(dataLength);
+    dataPos = 0;
+    for (buff = 0; buff < bufferCount; buff++) {
+      memcpy(data + dataPos, buffers[buff].data, buffers[buff].dataLength);
+      dataPos += buffers[buff].dataLength;
+    }
+
+    sentLength = sendto (socket, data, dataLength, MSG_NOSIGNAL, &sin, sizeof (struct sockaddr_in));
+    free(data);
+
     if (sentLength == -1)
     {
        if (errno == EWOULDBLOCK)
@@ -474,41 +486,60 @@ enet_socket_receive (ENetSocket socket,
                      ENetBuffer * buffers,
                      size_t bufferCount)
 {
-    struct msghdr msgHdr;
     struct sockaddr_in sin;
+    socklen_t sin_len;
+    size_t buff, dataPos, dataLength, dataCopyAmount;
+    char *data;
     int recvLength;
 
-    memset (& msgHdr, 0, sizeof (struct msghdr));
+    sin_len = sizeof (struct sockaddr_in);
 
-    if (address != NULL)
-    {
-        msgHdr.msg_name = & sin;
-        msgHdr.msg_namelen = sizeof (struct sockaddr_in);
+    // Allocate space for all the message buffers
+    dataLength = 0;
+    for (buff = 0; buff < bufferCount; buff++) {
+      dataLength += buffers[buff].dataLength;
     }
+    data = malloc(dataLength);
 
-    msgHdr.msg_iov = (struct iovec *) buffers;
-    msgHdr.msg_iovlen = bufferCount;
-
-    recvLength = recvmsg (socket, & msgHdr, MSG_NOSIGNAL);
+    /// TODO: libnx currently fails when trying to retrieve the sender address
+    recvLength = recvfrom (socket, data, dataLength, MSG_NOSIGNAL, NULL, NULL);
 
     if (recvLength == -1)
     {
+      free(data);
+
        if (errno == EWOULDBLOCK)
          return 0;
 
        return -1;
     }
 
-#ifdef HAS_MSGHDR_FLAGS
-    if (msgHdr.msg_flags & MSG_TRUNC)
-      return -1;
-#endif
+    // Split the read data across the message buffers
+    dataPos = 0;
+    for (buff = 0; buff < bufferCount; buff++) {
+      if (dataPos + buffers[buff].dataLength <= recvLength) {
+        dataCopyAmount = buffers[buff].dataLength;
+      }
+      else {
+        dataCopyAmount = recvLength - dataPos;
+        buffers[buff].dataLength = dataCopyAmount;
+      }
 
-    if (address != NULL)
-    {
-        address -> host = (enet_uint32) sin.sin_addr.s_addr;
-        address -> port = ENET_NET_TO_HOST_16 (sin.sin_port);
+      memcpy(buffers[buff].data, data + dataPos, dataCopyAmount);
+      dataPos += dataCopyAmount;
     }
+    free(data);
+
+//#ifdef HAS_MSGHDR_FLAGS
+//    if (msgHdr.msg_flags & MSG_TRUNC)
+//      return -1;
+//#endif
+
+//    if (address != NULL)
+//    {
+//        address -> host = (enet_uint32) sin.sin_addr.s_addr;
+//        address -> port = ENET_NET_TO_HOST_16 (sin.sin_port);
+//    }
 
     return recvLength;
 }

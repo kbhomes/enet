@@ -1008,6 +1008,11 @@ enet_protocol_handle_incoming_commands (ENetHost * host, ENetEvent * event)
     {
        peer = & host -> peers [peerID];
 
+       /// TODO: libnx recvfrom() appkears to fail when requesting the sender's address information
+       /// For now, assume the only peer is the address we received from
+       host->receivedAddress.host = peer->address.host;
+       host->receivedAddress.port = peer->address.port;
+
        if (peer -> state == ENET_PEER_STATE_DISCONNECTED ||
            peer -> state == ENET_PEER_STATE_ZOMBIE ||
            ((host -> receivedAddress.host != peer -> address.host ||
